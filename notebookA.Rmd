@@ -1,0 +1,172 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Load libraries
+```{r}
+library(jsonlite)
+library(data.table)
+library(stringi)
+library(e1071)
+```
+
+Load data and define debugging procedure
+```{r}
+rawTrainData <- fromJSON("data/train.json")
+```
+
+Load data table and transform data
+```{r}
+trainTable <- data.table(bathrooms = unlist(rawTrainData$bathrooms),
+                         bedrooms = unlist(rawTrainData$bedrooms),
+                         building_id = unlist(rawTrainData$building_id),
+                         created = unlist(rawTrainData$created),
+                         description = unlist(stri_length(rawTrainData$description)), #cleanup, word analysis
+                         display_address = unlist(rawTrainData$display_address), #needs to be cleaned and word analysis performed
+                         #features = unlist(rawTrainData$features), #analyze important features, count
+                         latitude = unlist(rawTrainData$latitude),
+                         listing_id = unlist(rawTrainData$listing_id),
+                         longitude = unlist(rawTrainData$longitude),
+                         manager_id = unlist(rawTrainData$manager_id),
+                         #photos = unlist(length(rawTrainData$photos)), #include count for now, maybe size, resolution, lighting analysis in the future
+                         price = unlist(rawTrainData$price),
+                         street_address = unlist(rawTrainData$street_address), #find difference with display address, needs to be cleaned and word analysis performed
+                         interest_level = unlist(rawTrainData$interest_level)
+                         )
+
+for (i in 1:length(trainTable$listing_id)) {
+  print(i)
+  trainTable$feature_count[i] <- length(unlist(rawTrainData$features[i]))
+}
+
+trainTable
+```
+
+NOT USED ANYMORE. Create integer column for interest level
+```{r}
+trainTable$interest_level <- gsub("medium", "pmedium", trainTable$interest_level)
+trainTable$interest_level <- gsub("high", "xhigh", trainTable$interest_level)
+trainTable$interest <- as.numeric(factor(trainTable$interest_level, levels = sort(unique(trainTable$interest_level))))
+trainTable$interest_level <- gsub("pmedium", "medium", trainTable$interest_level)
+trainTable$interest_level <- gsub("xhigh", "high", trainTable$interest_level)
+trainTable[,11:12]
+```
+
+Create integer columns for listing creation time
+```{r}
+trainTable$dayCreated <- as.POSIXlt(trainTable[[4]], format = "%Y-%m-%d %H:%M:%S")$mday
+trainTable$hourCreated <- as.POSIXlt(trainTable[[4]], format = "%Y-%m-%d %H:%M:%S")$hour
+```
+
+Create integer for building and manager
+```{r}
+trainTable
+buildingTable <- as.data.frame(table(trainTable$building_id))
+colnames(buildingTable) <- c("building_id", "freq")
+merge(trainTable, buildingTable, by="building_id", all=TRUE)
+trainTable
+```
+
+Analyze features
+```{r}
+#numeric: bathrooms, bedrooms, latitude, longitude, price, interest, dayCreated, hourCreated
+cor(trainTable[,c(1,2,6,8,10,12,13,14)])
+plot(table(trainTable$bathrooms))
+plot(table(trainTable$bedrooms))
+plot(table(trainTable$interest))
+plot(table(trainTable$dayCreated))
+plot(table(trainTable$hourCreated))
+
+min(trainTable$latitude); max(trainTable$latitude); mean(trainTable$latitude)
+min(trainTable$longitude); max(trainTable$longitude); mean(trainTable$longitude)
+min(trainTable$price); max(trainTable$price); mean(trainTable$price)
+ #TODO: description, display_address, features, photos, street_address
+```
+
+Cleanup features
+```{r}
+#TODO: evaluate if this is necessary
+names(trainTable)
+plot(trainTable$bathrooms) #
+plot(trainTable$bedrooms) #
+plot(trainTable$latitude) #
+plot(trainTable$longitude) #
+plot(trainTable$price) #
+
+temp.lm <- lm(interestClass~price, trainTable)
+trainTable$cooks <- cooks.distance(temp.lm)
+trainTable$student <- rstudent(temp.lm)
+pairs(bedrooms + interestClass, data=trainTable)
+trainTable[1]
+plot(lm(interestClass~bathrooms, trainTable[(trainTable$cooks < 4/length(trainTable$cooks) & abs(trainTable$student) < 3)]))
+max(trainTable[trainTable$cooks < 4/length(trainTable$cooks) & abs(trainTable$student) < 10]$bathrooms)
+```
+
+
+#First attempt
+Scale data
+```{r}
+#copy columns to new table
+train1 <- trainTable[,c(1,2,6,8,10,13,14,12)]
+
+#scale values
+range.max = 1; range.min = -1
+maxValue = max(train1$bathrooms); minValue = min(train1$bathrooms)
+train1$bathrooms = (range.max - range.min) * (train1$bathrooms - minValue) / (maxValue - minValue) + range.min
+
+maxValue = max(train1$bedrooms); minValue = min(train1$bedrooms)
+train1$bedrooms = (range.max - range.min) * (train1$bedrooms - minValue) / (maxValue - minValue) + range.min
+
+maxValue = max(train1$latitude); minValue = min(train1$latitude)
+train1$latitude = (range.max - range.min) * (train1$latitude - minValue) / (maxValue - minValue) + range.min
+
+maxValue = max(train1$longitude); minValue = min(train1$longitude)
+train1$longitude = (range.max - range.min) * (train1$longitude - minValue) / (maxValue - minValue) + range.min
+
+maxValue = max(train1$price); minValue = min(train1$price)
+train1$price = (range.max - range.min) * (train1$price - minValue) / (maxValue - minValue) + range.min
+
+maxValue = max(train1$dayCreated); minValue = min(train1$dayCreated)
+train1$dayCreated = (range.max - range.min) * (train1$dayCreated - minValue) / (maxValue - minValue) + range.min
+
+maxValue = max(train1$hourCreated); minValue = min(train1$hourCreated)
+train1$hourCreated = (range.max - range.min) * (train1$hourCreated - minValue) / (maxValue - minValue) + range.min
+
+#numeric: bathrooms, bedrooms, latitude, longitude, price, dayCreated, hourCreated, interest
+```
+
+SVM tunning, RBF Kernel, 36 hours
+```{r}
+Sys.time()
+svm.tune1 <- tune(svm, train1[,1:7], train1$interest, kernel="radial", ranges=list(cost=2^c(-5,-1,1,5), gamma=2^c(-4,-6,-8)))
+Sys.time()
+
+plot(svm.tune1)
+```
+
+Train SVM, limited crossvalidation to 5, only two classes (0,1), grid tuned by previous grid search, 
+```{r}
+# create new dataset
+train1_A <- within(train1, interest[interest != 1] <- 0)
+
+Sys.time()
+svm.tune1_A <- tune(svm, train.x=train1_A[,1:7], train.y=train1_A$interest, kernel="radial", ranges=list(cost=2^c(4.5,5.0,5.5), gamma=2^c(-4,-1,2)), tunecontrol = tune.control(cross=5))
+Sys.time()
+```
+
+```{r}
+trainMini <- within(train1, interest[interest != 3] <- "NOT HIGH")
+trainMini <- within(trainMini, interest[interest == 3] <- "HIGH")
+
+Sys.time()
+svm.tuneMini <- tune.svm(x=trainMini[,1], y=factor(trainMini$interest), kernel="radial", scale=FALSE, cost=2^c(-6,-3,0,3,6), gamma=2^c(-10,-5,0,5), tunecontrol = tune.control(cross=3))
+Sys.time()
+
+minisvm <- svm(x=train1_A[,1:7], y=factor(train1_A$interest), kernel="radial", cost=svm.tune1_A$best.parameters$cost, gamma=svm.tune1_A$best.parameters$gamma, scale=FALSE)
+
+predmini <- predict(minisvm, train[,1])
+
+table(predmini, trainMini$interest)
+```
+
